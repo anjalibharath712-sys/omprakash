@@ -1,16 +1,6 @@
 import json
-import os
 import re
 from typing import Any, Dict, List, Optional
-
-try:
-    from langchain.chat_models import ChatOpenAI
-    from langchain.chains import LLMChain
-    from langchain.prompts import PromptTemplate
-except ImportError:
-    ChatOpenAI = None
-    LLMChain = None
-    PromptTemplate = None
 
 from benefits_client import BenefitsClient
 
@@ -20,63 +10,9 @@ REQUIRED_PATIENT_FIELDS = ["first_name", "last_name", "dob", "gender", "member_i
 class BenefitMCP:
     def __init__(self) -> None:
         self.client = BenefitsClient()
-        self.llm = self._create_llm()
-        self.prompt_template = self._build_prompt_template()
-
-    def _create_llm(self) -> Optional[Any]:
-        if os.getenv("OPENAI_API_KEY") and ChatOpenAI is not None:
-            try:
-                return ChatOpenAI(temperature=0, model_name=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
-            except Exception:
-                return None
-        return None
-
-    def _build_prompt_template(self) -> Optional[PromptTemplate]:
-        if PromptTemplate is None:
-            return None
-
-        prompt_text = (
-            "You are an assistant that converts free-form benefit eligibility requests into a structured payload. "
-            "The user may provide NPI, patient details, and drug NDC. "
-            "Return only a valid JSON object with keys: npi, patient, drug, payer_id, group_id, place_of_service. "
-            "If you cannot find a value, omit that key. "
-            "Example response:\n"
-            "{\n"
-            "  \"npi\": \"1234567890\",\n"
-            "  \"patient\": {\"first_name\": \"Jane\", \"last_name\": \"Doe\", \"dob\": \"1980-01-01\", \"gender\": \"female\", \"member_id\": \"ABC123\"},\n"
-            "  \"drug\": {\"ndc\": \"12345-6789\", \"name\": \"drug name\"}\n"
-            "}\n"
-        )
-        return PromptTemplate(input_variables=["user_text"], template=prompt_text)
 
     def parse_nlp_payload(self, user_text: str) -> Dict[str, Any]:
-        if self.llm and self.prompt_template:
-            try:
-                chain = LLMChain(llm=self.llm, prompt=self.prompt_template)
-                raw = chain.run(user_text=user_text)
-                parsed = self._safe_parse_json(raw)
-                if parsed:
-                    return parsed
-            except Exception:
-                pass
-
         return self._fallback_parse(user_text)
-
-    def _safe_parse_json(self, raw_text: str) -> Dict[str, Any]:
-        text = raw_text.strip()
-        if text.startswith("```"):
-            text = text.strip("` \n")
-        text = re.sub(r"^.*?\{", "{", text, flags=re.S)
-        try:
-            return json.loads(text)
-        except ValueError:
-            try:
-                json_text = re.search(r"\{.*\}", text, flags=re.S)
-                if json_text:
-                    return json.loads(json_text.group(0))
-            except ValueError:
-                pass
-        return {}
 
     def _fallback_parse(self, text: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {}

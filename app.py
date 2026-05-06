@@ -1,120 +1,315 @@
-import json
-from pathlib import Path
-from typing import Any, Dict
+import os
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, Header, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from mcp import BenefitMCP
 
-app = FastAPI(title="eBV Benefits Eligibility Demo")
+app = FastAPI(
+    title="eBV Benefits Eligibility Mock API",
+    description="Mock API for electronic benefits verification",
+    version="1.0.0"
+)
 
 mcp = BenefitMCP()
 
-HTML_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>eBV Benefits Check Demo</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f4f7fb; color: #1f2937; }
-    header { background: #2563eb; color: #fff; padding: 24px; text-align: center; }
-    main { padding: 24px; max-width: 960px; margin: auto; }
-    textarea { width: 100%; min-height: 140px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; font-size: 1rem; }
-    button { background: #2563eb; border: none; color: #fff; padding: 12px 18px; font-size: 1rem; border-radius: 8px; cursor: pointer; }
-    button.secondary { background: #475569; margin-left: 8px; }
-    pre { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; overflow-x: auto; }
-    .sample-buttons button { margin-bottom: 8px; }
-    .notice { margin: 16px 0; padding: 16px; border-radius: 8px; background: #eff6ff; color: #1e3a8a; }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>eBV Benefits Eligibility Demo</h1>
-    <p>Enter a natural language request and the MCP layer will validate required fields before calling the backend.</p>
-  </header>
-  <main>
-    <div class="notice">
-      <strong>Required fields:</strong> NPI, patient first/last name, DOB, gender, member ID, and drug NDC.
-      If any of these are missing, the backend is not called.
-    </div>
-    <label for="userText"><strong>Request text</strong></label>
-    <textarea id="userText" placeholder="Example: Check benefits for NPI 1234567890 for patient Jane Doe DOB 1984-07-10 female member ID MBR12345 and drug NDC 0000000000."></textarea>
-    <div style="margin: 16px 0;">
-      <button id="submitButton">Run eligibility check</button>
-      <button class="secondary" id="clearButton" type="button">Clear</button>
-    </div>
-    <div class="sample-buttons">
-      <button type="button" onclick="useExample('Check eligibility for NPI 1234567890, patient John Doe born 1980-01-01 male member ID MBR00001, drug NDC 12345-6789.')">covered_no_restrictions sample</button>
-      <button type="button" onclick="useExample('Check eligibility for NPI 1234567890, patient Sarah Smith DOB 1975-10-21 female member ID MBR00002, drug NDC PA-0000.')">covered_pa_required sample</button>
-      <button type="button" onclick="useExample('Check eligibility for NPI 1234567890, patient Peter Lee DOB 1990-06-15 male member ID MBR00003, drug NDC STEP-1234.')">covered_step_therapy sample</button>
-    </div>
-    <div style="margin-top: 24px;">
-      <h2>Payload and result</h2>
-      <pre id="resultArea">Waiting for user input...</pre>
-    </div>
-  </main>
-  <script>
-    const resultArea = document.getElementById('resultArea');
-    const userText = document.getElementById('userText');
-    let currentPayload = {};
+# Mock bearer token for authentication
+VALID_TOKEN = os.getenv("BEARER_TOKEN", "ebv-mock-token-123")
 
-    document.getElementById('submitButton').addEventListener('click', async () => {
-      await sendRequest();
-    });
 
-    document.getElementById('clearButton').addEventListener('click', () => {
-      userText.value = '';
-      currentPayload = {};
-      resultArea.textContent = 'Waiting for user input...';
-    });
+# ==================== Request Models ====================
 
-    async function sendRequest() {
-      const text = userText.value.trim();
-      if (!text) {
-        resultArea.textContent = 'Please enter a natural language request first.';
-        return;
-      }
+class Drug(BaseModel):
+    ndc: str = Field(..., description="National Drug Code")
 
-      resultArea.textContent = 'Processing...';
-      try {
-        const response = await fetch('/api/check-benefits', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, current_payload: currentPayload }),
-        });
-        const payload = await response.json();
-        if (payload.payload) {
-          currentPayload = payload.payload;
+
+class Prescription(BaseModel):
+    drug: Drug
+    quantity: str = Field(default="1", description="Drug quantity")
+    daysSupply: str = Field(default="28", description="Days supply")
+
+
+class Prescriptions(BaseModel):
+    prescription: List[Prescription]
+
+
+class Diagnosis(BaseModel):
+    name: str = Field(..., description="Diagnosis name")
+    prescriptions: Prescriptions
+
+
+class Patient(BaseModel):
+    channelType: str = Field(default="Web", description="Channel type (Web, Mobile, etc.)")
+    firstName: str = Field(..., description="Patient first name")
+    lastName: str = Field(..., description="Patient last name")
+    dateOfBirth: str = Field(..., description="Date of birth (YYYY-MM-DD)")
+
+
+class HealthCareProfessional(BaseModel):
+    npi: str = Field(..., description="National Provider Identifier")
+
+
+class EBVRequest(BaseModel):
+    healthCareProfessional: Optional[HealthCareProfessional] = None
+    patient: Patient
+    diagnosis: Diagnosis
+
+
+class BenefitsRequest(BaseModel):
+    eBVRequest: EBVRequest
+
+
+# ==================== Response Models ====================
+
+class DrugResponse(BaseModel):
+    drugName: str
+    ndc: str
+
+
+class BenefitsSummary(BaseModel):
+    benefitVerificationStatus: str = Field(default="Complete", description="Status of verification")
+    drug: DrugResponse
+    coverageStatus: str = Field(description="Coverage status (Covered, Not Covered, etc.)")
+    copay: str = Field(description="Copay amount")
+    priorAuthorizationRequired: str = Field(description="Prior auth required (Yes/No)")
+    stepTherapyRequired: str = Field(description="Step therapy required (Yes/No)")
+
+
+class EBVResponse(BaseModel):
+    benefitsSummary: BenefitsSummary
+
+
+class BenefitsResponse(BaseModel):
+    eBVResponse: EBVResponse
+
+
+# ==================== Scenario Handlers ====================
+
+SCENARIO_RESPONSES = {
+    "covered_no_restrictions": {
+        "drug_name": "HUMIRA",
+        "coverage": "Covered",
+        "copay": "$50",
+        "prior_auth": "No",
+        "step_therapy": "No"
+    },
+    "covered_pa_required": {
+        "drug_name": "SPECIALTY DRUG",
+        "coverage": "Covered",
+        "copay": "$100",
+        "prior_auth": "Yes",
+        "step_therapy": "No"
+    },
+    "covered_step_therapy": {
+        "drug_name": "STEP THERAPY DRUG",
+        "coverage": "Covered",
+        "copay": "$35",
+        "prior_auth": "No",
+        "step_therapy": "Yes"
+    },
+    "not_covered": {
+        "drug_name": "EXPERIMENTAL DRUG",
+        "coverage": "Not Covered",
+        "copay": "N/A",
+        "prior_auth": "No",
+        "step_therapy": "No"
+    }
+}
+
+
+def get_drug_name_from_ndc(ndc: str) -> str:
+    """Get drug name based on NDC or scenario"""
+    ndc_lower = ndc.lower()
+    if "humira" in ndc_lower or "00074" in ndc_lower:
+        return "HUMIRA"
+    elif "pa" in ndc_lower or "prior" in ndc_lower:
+        return "SPECIALTY DRUG"
+    elif "step" in ndc_lower:
+        return "STEP THERAPY DRUG"
+    else:
+        return "GENERIC DRUG"
+
+
+def get_response_for_scenario(scenario: str, ndc: str) -> Dict[str, Any]:
+    """Get mock response based on scenario or NDC"""
+    scenario_lower = scenario.lower() if scenario else "covered_no_restrictions"
+    
+    if scenario_lower in SCENARIO_RESPONSES:
+        return SCENARIO_RESPONSES[scenario_lower]
+    
+    # Fallback: determine from NDC
+    ndc_lower = ndc.lower()
+    if "pa-" in ndc_lower or "prior" in ndc_lower:
+        return SCENARIO_RESPONSES["covered_pa_required"]
+    elif "step-" in ndc_lower:
+        return SCENARIO_RESPONSES["covered_step_therapy"]
+    else:
+        return SCENARIO_RESPONSES["covered_no_restrictions"]
+
+
+def verify_bearer_token(authorization: Optional[str]) -> bool:
+    """Verify bearer token"""
+    if not authorization:
+        return False
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    return parts[1] == VALID_TOKEN
+
+
+# ==================== Endpoints ====================
+
+@app.get("/", tags=["Health"])
+def read_root():
+    """Root endpoint - API status"""
+    return {
+        "status": "healthy",
+        "service": "eBV Benefits Eligibility Mock API",
+        "version": "1.0.0",
+        "documentation": "/docs"
+    }
+
+
+@app.get("/health", tags=["Health"])
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": "2026-05-06T00:00:00Z"
+    }
+
+
+@app.post("/ebv/benefits", response_model=BenefitsResponse, tags=["Benefits"])
+def get_benefits_eligibility(
+    request: BenefitsRequest,
+    authorization: Optional[str] = Header(None),
+    x_scenario: Optional[str] = Header(None)
+):
+    """
+    Check benefits eligibility for a patient's prescription.
+    
+    **Authentication:** Bearer token in Authorization header
+    
+    **Headers:**
+    - Authorization: Bearer <token> (required)
+    - x-scenario: Scenario type (optional) - covered_no_restrictions, covered_pa_required, covered_step_therapy, not_covered
+    
+    **Request Body:** eBVRequest with patient, provider, and diagnosis information
+    
+    **Response:** eBVResponse with benefits summary
+    
+    **Example:**
+    ```bash
+    curl --location 'http://localhost:8000/ebv/benefits' \\
+      --header 'Authorization: Bearer ebv-mock-token-123' \\
+      --header 'x-scenario: covered_no_restrictions' \\
+      --header 'Content-Type: application/json' \\
+      --data '{
+        "eBVRequest": {
+          "healthCareProfessional": {"npi": "1083773444"},
+          "patient": {
+            "channelType": "Web",
+            "firstName": "Alex",
+            "lastName": "Carter",
+            "dateOfBirth": "1985-03-12"
+          },
+          "diagnosis": {
+            "name": "Rheumatoid Arthritis (RA)",
+            "prescriptions": {
+              "prescription": [
+                {"drug": {"ndc": "00074153903"}, "quantity": "1", "daysSupply": "28"}
+              ]
+            }
+          }
         }
-        resultArea.textContent = JSON.stringify(payload, null, 2);
-      } catch (error) {
-        resultArea.textContent = 'Error: ' + error.message;
-      }
-    }
+      }'
+    ```
+    """
+    
+    # Verify authorization
+    if not verify_bearer_token(authorization):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Extract data from request
+    patient = request.eBVRequest.patient
+    prescriptions = request.eBVRequest.diagnosis.prescriptions.prescription
+    
+    if not prescriptions:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one prescription is required"
+        )
+    
+    # Process first prescription
+    first_prescription = prescriptions[0]
+    ndc = first_prescription.drug.ndc
+    
+    # Get scenario response
+    scenario_response = get_response_for_scenario(x_scenario, ndc)
+    drug_name = scenario_response.get("drug_name") or get_drug_name_from_ndc(ndc)
+    
+    # Build response
+    benefits_summary = BenefitsSummary(
+        benefitVerificationStatus="Complete",
+        drug=DrugResponse(
+            drugName=drug_name,
+            ndc=ndc
+        ),
+        coverageStatus=scenario_response.get("coverage", "Covered"),
+        copay=scenario_response.get("copay", "$50"),
+        priorAuthorizationRequired=scenario_response.get("prior_auth", "No"),
+        stepTherapyRequired=scenario_response.get("step_therapy", "No")
+    )
+    
+    response = BenefitsResponse(
+        eBVResponse=EBVResponse(
+            benefitsSummary=benefits_summary
+        )
+    )
+    
+    return response
 
-    function useExample(text) {
-      userText.value = text;
-      sendRequest();
-    }
-  </script>
-</body>
-</html>"""
 
-
-class RequestPayload(BaseModel):
-    text: str
+@app.post("/ebv/benefits/nlp", tags=["Benefits"])
+def get_benefits_eligibility_nlp(
+    text: str,
+    authorization: Optional[str] = Header(None),
     current_payload: Optional[Dict[str, Any]] = None
+):
+    """
+    Check benefits eligibility using natural language processing.
+    
+    This endpoint accepts free-form text and uses MCP to parse it into structured data.
+    
+    **Authentication:** Bearer token in Authorization header
+    """
+    
+    # Verify authorization
+    if not verify_bearer_token(authorization):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not text or not text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Text field cannot be empty"
+        )
+    
+    # Use MCP to parse text
+    result = mcp.handle_text_input(text, current_payload or {})
+    
+    return result
 
 
-@app.get("/", response_class=HTMLResponse)
-async def homepage() -> HTMLResponse:
-    return HTML_PAGE
-
-
-@app.post("/api/check-benefits")
-async def check_benefits(payload: RequestPayload) -> JSONResponse:
-    result = mcp.handle_text_input(payload.text, payload.current_payload or {})
-    return JSONResponse(result)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

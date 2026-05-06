@@ -2,6 +2,3 @@ fastapi>=0.105.0
 uvicorn[standard]>=0.24.0
 requests>=2.32.0
 python-dotenv>=1.0.0
-langchain>=0.0.485
-openai>=1.0.0
-streamlit>=1.28.0
